@@ -7,7 +7,7 @@ import { demoBundleBoundaryPlugin } from "./vite.demo-boundary.js";
 // The dev stack points Vite at its own API. `npm run dev:web` leaves the variables unset and stays on 4910.
 const devApiOrigin = process.env.SPACE_API_ORIGIN
   ?? `http://127.0.0.1:${process.env.SPACE_API_PORT ?? "4910"}`;
-const devProxy = (websocket) => ({ target: devApiOrigin, ws: websocket });
+const devProxy = (websocket: boolean) => ({ target: devApiOrigin, ws: websocket });
 
 export function manualChunkForModule(moduleId: string): string | undefined {
   const normalizedId = moduleId.replaceAll("\\", "/");
