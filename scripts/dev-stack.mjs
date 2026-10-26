@@ -328,6 +328,10 @@ export function bindChildFailure(records, onFailure) {
   }
 }
 
+export function pullFailureIsTransient(message) {
+  return /timeout|deadline exceeded|toomanyrequests|TLS handshake|connection reset|unexpected EOF|temporarily unavailable|i\/o timeout|Client\.Timeout/i.test(message);
+}
+
 export function scrubSecrets(text, secrets = []) {
   let next = String(text)
     .replace(/postgres(?:ql)?:\/\/[^\s'"]+/gi, "postgres://[redacted]")
@@ -557,9 +561,7 @@ async function runUp(stateDir) {
   const docker = await resolveDocker();
   writeLine(1, "dev-stack: starting PostgreSQL and Temporal");
   // Pull first so the health wait is not spent downloading images.
-  await runLogged(docker.argv, composeArgs(paths.composeFile, COMPOSE_PROJECT, "pull", "postgres", "temporal"), {
-    cwd: paths.root
-  });
+  await pullComposeImages(docker, paths);
   await runLogged(docker.argv, composeArgs(paths.composeFile, COMPOSE_PROJECT, "up", "-d", "--wait", "--wait-timeout", "300", "postgres", "temporal"), {
     cwd: paths.root
   });
@@ -902,6 +904,25 @@ async function buildPackages(env) {
   }
 }
 
+async function pullComposeImages(docker, paths) {
+  let last = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await runLogged(docker.argv, composeArgs(paths.composeFile, COMPOSE_PROJECT, "pull", "postgres", "temporal"), {
+        cwd: paths.root
+      });
+      return;
+    } catch (error) {
+      last = error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!pullFailureIsTransient(message) || attempt === 3) throw error;
+      writeLine(2, `dev-stack: image pull failed (attempt ${attempt}); retrying`);
+      await delay(5_000 * attempt);
+    }
+  }
+  throw last;
+}
+
 async function ensureTemporalNamespace(docker, composeFile) {
   const result = await runLogged(docker.argv, composeArgs(
     composeFile,
@@ -1090,6 +1111,9 @@ function execFile(command, args) {
 
 function runLogged(argv, args, { cwd = repoRoot, env = process.env, allowFailure = false } = {}) {
   return new Promise((resolvePromise, reject) => {
+    if (process.env.SPACE_DEV_STACK_TRACE === "1") {
+      writeLine(1, `dev-stack: run ${new Date().toISOString()} ${[...argv, ...args].join(" ")}`);
+    }
     const child = spawn(argv[0], [...argv.slice(1), ...args], {
       cwd,
       env,

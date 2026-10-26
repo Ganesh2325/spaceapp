@@ -2,7 +2,7 @@
 // CI and local proof for `npm run dev:stack`. No TTY is allocated.
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { closeSync, existsSync, openSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -75,7 +75,7 @@ async function waitForReady(api, supervisor, timeoutMs) {
   let last = "no response yet";
   while (Date.now() < deadline) {
     if (supervisor.exitCode !== null) {
-      throw new Error(`dev stack exited ${supervisor.exitCode} before /readyz. See ${SUPERVISOR_LOG}`);
+      throw new Error(`dev stack exited ${supervisor.exitCode} before /readyz. The supervisor log is printed above.`);
     }
     try {
       const response = await fetch(`${api}/readyz?strict=1`, { signal: AbortSignal.timeout(5_000) });
@@ -261,14 +261,22 @@ async function main() {
   const api = `http://127.0.0.1:${ports.api}`;
   const root = stateDir();
   const optExisted = existsSync("/opt/spaceapp");
-  const logFd = openSync(SUPERVISOR_LOG, "w");
+  writeFileSync(SUPERVISOR_LOG, "");
   const supervisor = spawn(process.execPath, [join(scriptDir, "dev-stack.mjs")], {
     cwd: repoRoot,
-    env: { ...process.env, ELECTRON_SKIP_BINARY_DOWNLOAD: "1", TERM: "dumb" },
+    env: { ...process.env, ELECTRON_SKIP_BINARY_DOWNLOAD: "1", TERM: "dumb", SPACE_DEV_STACK_TRACE: "1" },
     detached: true,
-    stdio: ["ignore", logFd, logFd]
+    stdio: ["ignore", "pipe", "pipe"]
   });
-  closeSync(logFd);
+  const captured = [];
+  const capture = (chunk) => {
+    const buffer = Buffer.from(chunk);
+    captured.push(buffer);
+    appendFileSync(SUPERVISOR_LOG, buffer);
+  };
+  supervisor.stdout.on("data", capture);
+  supervisor.stderr.on("data", capture);
+  supervisor.capturedOutput = () => Buffer.concat(captured).toString("utf8");
   let secrets = [];
   let records;
   let resetFailure = null;
@@ -299,6 +307,8 @@ async function main() {
     }
   } finally {
     if (!secrets.length) secrets = await secretValues(root).catch(() => []);
+    const earlyLog = scrubSecrets(supervisor.capturedOutput?.() ?? "", secrets);
+    if (earlyLog.trim()) say(`----- supervisor log -----\n${earlyLog.slice(-20000)}\n----- end supervisor log -----`);
     say("dev-stack gate: resetting");
     const reset = spawn(process.execPath, [join(scriptDir, "dev-stack.mjs"), "reset"], {
       cwd: repoRoot,

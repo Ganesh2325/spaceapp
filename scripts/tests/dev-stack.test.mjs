@@ -21,6 +21,7 @@ import {
   installedPathFallbacks,
   parseComposeImages,
   parseOpenCodePackage,
+  pullFailureIsTransient,
   parseProcStat,
   processIdentityMatches,
   readProcessIdentity,
@@ -211,6 +212,13 @@ test("OpenCode cleanup only matches processes from this state directory", () => 
   assert.equal(cwdBelongsToState(stateDir, "/tmp/other"), false);
   assert.equal(executableBelongsToState(stateDir, `${stateDir}/tools/opencode/node_modules/.bin/opencode`), true);
   assert.equal(executableBelongsToState(stateDir, "/usr/local/bin/opencode"), false);
+});
+
+test("image pull retries only transient registry failures", () => {
+  assert.equal(pullFailureIsTransient("docker compose pull failed (1)\nnet/http: request canceled (Client.Timeout exceeded while awaiting headers)"), true);
+  assert.equal(pullFailureIsTransient("toomanyrequests: You have reached your pull rate limit"), true);
+  assert.equal(pullFailureIsTransient("manifest unknown"), false);
+  assert.equal(pullFailureIsTransient("postgres-password must be mode 0600."), false);
 });
 
 test("the gate reads the session cookie and builds a loopback terminal socket", () => {
