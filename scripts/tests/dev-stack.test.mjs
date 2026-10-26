@@ -75,6 +75,8 @@ test("dev-stack ports default off the installed app and stay on loopback", () =>
     assert.match(rendered, new RegExp(`127\\.0\\.0\\.1:${port}:`));
   }
   assert.match(rendered, /POSTGRES_PASSWORD_FILE/);
+  assert.match(rendered, /user: root/);
+  assert.match(rendered, /exec su temporal -c 'exec \/etc\/temporal\/entrypoint.sh autosetup'/);
 });
 
 test("state directories cannot replace the checkout, home, or an install path", () => {

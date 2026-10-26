@@ -179,9 +179,20 @@ services:
       POSTGRES_USER: ${DATABASE_USER}
       POSTGRES_SEEDS: postgres
       DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml
+    # The image user is uid 1000. A host secret of mode 0600 is readable there
+    # only when the host user is also uid 1000. GitHub-hosted runners are uid
+    # 1001, so cat fails and the server exits 1. Read it as root, then drop.
+    user: root
     entrypoint: ["/bin/sh", "-ec"]
     command:
-      - export POSTGRES_PWD="$$(cat /run/secrets/postgres-password)"; exec /etc/temporal/entrypoint.sh autosetup
+      - |
+        set -eu
+        cp /run/secrets/postgres-password /tmp/postgres-password
+        chown temporal:temporal /tmp/postgres-password
+        chmod 0400 /tmp/postgres-password
+        export POSTGRES_PWD="$$(cat /tmp/postgres-password)"
+        rm -f /tmp/postgres-password
+        exec su temporal -c 'exec /etc/temporal/entrypoint.sh autosetup'
     ports:
       - "127.0.0.1:${ports.temporal}:7233"
     secrets:
@@ -562,9 +573,19 @@ async function runUp(stateDir) {
   writeLine(1, "dev-stack: starting PostgreSQL and Temporal");
   // Pull first so the health wait is not spent downloading images.
   await pullComposeImages(docker, paths);
-  await runLogged(docker.argv, composeArgs(paths.composeFile, COMPOSE_PROJECT, "up", "-d", "--wait", "--wait-timeout", "300", "postgres", "temporal"), {
-    cwd: paths.root
-  });
+  try {
+    await runLogged(docker.argv, composeArgs(paths.composeFile, COMPOSE_PROJECT, "up", "-d", "--wait", "--wait-timeout", "300", "postgres", "temporal"), {
+      cwd: paths.root
+    });
+  } catch (error) {
+    const logs = await runLogged(docker.argv, composeArgs(paths.composeFile, COMPOSE_PROJECT, "logs", "--no-color", "--tail", "160"), {
+      cwd: paths.root,
+      allowFailure: true
+    });
+    const message = error instanceof Error ? error.message : String(error);
+    const tail = scrubSecrets(`${logs.stdout}\n${logs.stderr}`, [secrets.password, secrets.sessionSecret, secrets.setupToken]).slice(-4000);
+    throw new Error(`${message}\n----- compose logs -----\n${tail}`);
+  }
   await ensureTemporalNamespace(docker, paths.composeFile);
   writeLine(1, "dev-stack: installing the pinned OpenCode CLI into the state directory");
   await installOpenCode(paths, packageSpec, env);
