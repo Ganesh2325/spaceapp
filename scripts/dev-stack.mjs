@@ -556,7 +556,11 @@ async function runUp(stateDir) {
 
   const docker = await resolveDocker();
   writeLine(1, "dev-stack: starting PostgreSQL and Temporal");
-  await runLogged(docker.argv, composeArgs(paths.composeFile, COMPOSE_PROJECT, "up", "-d", "--wait", "--wait-timeout", "240", "postgres", "temporal"), {
+  // Pull first so the health wait is not spent downloading images.
+  await runLogged(docker.argv, composeArgs(paths.composeFile, COMPOSE_PROJECT, "pull", "postgres", "temporal"), {
+    cwd: paths.root
+  });
+  await runLogged(docker.argv, composeArgs(paths.composeFile, COMPOSE_PROJECT, "up", "-d", "--wait", "--wait-timeout", "300", "postgres", "temporal"), {
     cwd: paths.root
   });
   await ensureTemporalNamespace(docker, paths.composeFile);
