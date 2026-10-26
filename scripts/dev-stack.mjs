@@ -955,13 +955,14 @@ export async function leftoverResources(docker, project) {
 }
 
 export async function resolveDocker() {
+  // `docker compose version` succeeds without a daemon. `docker info` checks the socket.
   const candidates = [
-    ["docker", "compose"],
-    ["sudo", "-n", "docker", "compose"]
+    ["docker"],
+    ["sudo", "-n", "docker"]
   ];
   for (const argv of candidates) {
-    const result = await runLogged(argv, ["version"], { allowFailure: true });
-    if (result.status === 0) return { argv };
+    const result = await runLogged(argv, ["info"], { allowFailure: true });
+    if (result.status === 0) return { argv: [...argv, "compose"] };
   }
   throw new Error("Docker Compose is required. Install Docker and make `docker compose` usable without a password prompt.");
 }
