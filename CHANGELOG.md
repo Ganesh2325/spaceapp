@@ -5,6 +5,10 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Contributors
+
+- `npm run dev:stack` runs PostgreSQL, Temporal, the API, the web app, the worker, and the CLI host from a checkout. `down` stops that stack and `reset` removes only what it created.
+
 ## [1.1.8] - 2026-10-25
 
 Source: sanitized Space app @ 8d5bf21b32 (4948 files). Verifies SpaceApp's image attestations before an

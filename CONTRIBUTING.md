@@ -50,6 +50,85 @@ select a short temporary directory you own and set `TMPDIR` for the command.
 On Windows run this particular smoke check inside WSL or a Linux development
 container. It does not certify the Windows/macOS installer.
 
+## Run the full app from source
+
+`npm run dev:stack` starts a contributor copy of the product from this checkout.
+It does not use an installed SpaceApp, its ports, its database, or its dev-login
+shortcut.
+
+Prerequisites, in addition to the Node and npm versions above:
+
+- Docker, with `docker compose` usable without an interactive password prompt.
+  On macOS use Docker Desktop or Colima. On Windows 11 use Docker Desktop's
+  WSL2 engine and run these commands inside the WSL2 distro, not from PowerShell.
+  The stack uses Unix sockets and a PTY, so a native Windows shell is not enough.
+- A local checkout with `npm ci` already finished. The first run pulls the
+  pinned PostgreSQL and Temporal images and installs the OpenCode version
+  pinned in the Dockerfile. Those steps need the network. Later runs reuse them.
+- `stty` on `PATH` (`/usr/bin/stty`). It is part of a normal Linux install and of
+  Docker Desktop's utility image on macOS.
+
+```sh
+npm run dev:stack
+npm run dev:stack -- down
+npm run dev:stack -- reset
+npm run dev:stack -- rebuild
+```
+
+`dev:stack` starts PostgreSQL and Temporal, applies migrations, then runs the
+API, the Vite app, the Temporal worker, and the CLI host from this tree. While
+the owner still needs to be created it prints the web URL and a one-time setup
+token. Open that URL, create the owner with the token, and sign in. The token
+is not printed again after the owner exists. `down` stops the processes and
+containers and keeps the data. `reset` removes only the containers, volumes,
+and state directory this command created.
+
+Everything for this command lives under `.dev-stack/` (override with
+`SPACE_DEV_STACK_STATE_DIR` or `--state-dir`). That directory is gitignored.
+Docker uses the compose project `spaceapp-devstack` and the image digests in
+`packages/run-spaceapp/templates/compose.yml`. Secrets are created in
+`.dev-stack/secrets/` with mode `0600`. The database password and session
+secret stay there. Only the setup token is written to the terminal.
+
+Ports bind to `127.0.0.1` and stay off the installed app's `4910` and `4911`:
+
+| Service   | Default | Override                      |
+| --------- | ------- | ----------------------------- |
+| Web       | 5911    | `SPACE_DEV_STACK_WEB_PORT`    |
+| API       | 5910    | `SPACE_DEV_STACK_API_PORT`    |
+| Postgres  | 55432   | `SPACE_DEV_STACK_POSTGRES_PORT` |
+| Temporal  | 57233   | `SPACE_DEV_STACK_TEMPORAL_PORT` |
+
+Saving a file under `apps/api/src` restarts the API. Saving a file under
+`apps/web/src` updates the browser through Vite. After a change under
+`packages/*`, run `npm run dev:stack -- rebuild`. That rebuilds the workspace
+packages and restarts the CLI host, API, worker, and web app.
+
+Browser panes and the companion services stay off, and the UI says so. The
+Getting Started room's OpenCode pane is the one CLI this command installs. The
+binary is under `.dev-stack/tools/`, not on the system `PATH`.
+
+Troubleshooting:
+
+- `Docker Compose is required` means the daemon is stopped or `docker compose`
+  asked for a password. Start Docker Desktop, or `colima start` on macOS, then
+  retry. `sudo -n docker compose version` has to succeed if your user is not in
+  the `docker` group.
+- A port already in use fails the process that wanted it. Set the matching
+  `SPACE_DEV_STACK_*_PORT` variable. Do not point this stack at `4910` or `4911`
+  while an installed copy is running.
+- `CLI host socket path is too long` means the state directory is too deep for
+  a Unix socket. Export a short `TMPDIR` and start again.
+- If the API, worker, web app, or CLI host exits, the supervisor prints
+  `dev-stack: <name> exited unexpectedly` and shuts the rest down. The log path
+  is on that line, under `.dev-stack/logs/`. Fix the cause and run `dev:stack`
+  again. `reset` if you want a new database and a new setup token.
+- OpenCode needs outbound network access the first time its pane starts. No
+  provider account is required to reach its terminal UI. If the pane says
+  OpenCode did not start, run `reset` and open the pane again.
+- `npm run dev:api` is a different, older shortcut. It turns on dev-login. This
+  stack does not.
+
 ## Make and verify a small change
 
 Work on a branch, not on `main`, so the change can become a pull request:

@@ -1,5 +1,6 @@
 .git
 .github
+.dev-stack
 .env
 .env.*
 node_modules

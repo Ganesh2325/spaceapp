@@ -4,6 +4,11 @@ import { retainOpenTabAssets } from "./vite.asset-retention.js";
 import react from "@vitejs/plugin-react";
 import { demoBundleBoundaryPlugin } from "./vite.demo-boundary.js";
 
+// The dev stack points Vite at its own API. `npm run dev:web` leaves the variables unset and stays on 4910.
+const devApiOrigin = process.env.SPACE_API_ORIGIN
+  ?? `http://127.0.0.1:${process.env.SPACE_API_PORT ?? "4910"}`;
+const devProxy = (websocket) => ({ target: devApiOrigin, ws: websocket });
+
 export function manualChunkForModule(moduleId: string): string | undefined {
   const normalizedId = moduleId.replaceAll("\\", "/");
   if (
@@ -34,11 +39,13 @@ export default defineConfig({
     host: process.env.SPACE_WEB_HOST ?? "0.0.0.0",
     port: Number.parseInt(process.env.SPACE_WEB_PORT ?? "4911", 10),
     proxy: {
-      "/api": "http://127.0.0.1:4910",
-      "/plugins": "http://127.0.0.1:4910",
-      "/healthz": "http://127.0.0.1:4910",
-      "/readyz": "http://127.0.0.1:4910",
-      "/version": "http://127.0.0.1:4910"
+      "/api": devProxy(true),
+      "/plugins": devProxy(true),
+      "/healthz": devProxy(false),
+      "/livez": devProxy(false),
+      "/readyz": devProxy(false),
+      "/version": devProxy(false),
+      "/logout": devProxy(false)
     }
   },
   test: {
