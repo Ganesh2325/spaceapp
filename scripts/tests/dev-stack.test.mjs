@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { sessionCookieFrom, terminalSocketUrl } from "../ci-dev-stack-gate.mjs";
+import { sessionCookieFrom, terminalFrameText, terminalSocketUrl } from "../ci-dev-stack-gate.mjs";
 import {
   COMPOSE_PROJECT,
   DEFAULT_PORTS,
@@ -228,4 +228,7 @@ test("the gate reads the session cookie and builds a loopback terminal socket", 
   assert.equal(url.pathname, `/api/panes/${encodeURIComponent("pane:1")}/cli/terminal`);
   assert.equal(url.searchParams.get("sessionId"), "cli_session:1");
   assert.equal(url.searchParams.get("initialCols"), "80");
+  const frame = terminalFrameText(JSON.stringify({ type: "output", data: "OpenCode \u001b[0m" }));
+  assert.match(frame, /OpenCode/);
+  assert.equal(frame.includes(String.fromCharCode(0x1b)), true);
 });

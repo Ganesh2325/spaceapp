@@ -32,6 +32,17 @@ export function sessionCookieFrom(setCookieLines, name) {
   return null;
 }
 
+export function terminalFrameText(data) {
+  const text = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed?.data === "string") return parsed.data;
+  } catch {
+    // A frame can be plain text while the socket is still opening.
+  }
+  return text;
+}
+
 export function terminalSocketUrl(apiHttpUrl, paneId, ticket) {
   const url = new URL(`/api/panes/${encodeURIComponent(paneId)}/cli/terminal`, apiHttpUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -126,10 +137,7 @@ async function openCodePane(api, cookie, roomId) {
     socket.once("open", resolve);
     socket.once("error", reject);
   });
-  socket.on("message", (data) => {
-    const text = String(data);
-    output.push(text);
-  });
+  socket.on("message", (data) => output.push(terminalFrameText(data)));
   await opened;
   const deadline = Date.now() + 180_000;
   let status = session.session?.status ?? "UNKNOWN";
@@ -137,8 +145,8 @@ async function openCodePane(api, cookie, roomId) {
     const current = await fetch(`${api}/api/panes/${encodeURIComponent(pane.id)}/cli/session`, { headers });
     const body = await readJson(current);
     status = body?.session?.status ?? status;
-    const rendered = output.join("\n");
-    if (status === "RUNNING" && rendered.includes("\u001b[")) {
+    const rendered = output.join("");
+    if (status === "RUNNING" && /opencode/i.test(rendered)) {
       socket.close();
       return { paneId: pane.id, status, outputBytes: rendered.length };
     }
@@ -146,7 +154,7 @@ async function openCodePane(api, cookie, roomId) {
     await delay(1_000);
   }
   socket.close();
-  const sample = output.join("\n").split(String.fromCharCode(0x1b)).join("").slice(-500);
+  const sample = output.join("").split(String.fromCharCode(0x1b)).join("").slice(-500);
   throw new Error(`OpenCode pane did not reach a running terminal UI (status ${status}). Last output: ${sample}`);
 }
 
