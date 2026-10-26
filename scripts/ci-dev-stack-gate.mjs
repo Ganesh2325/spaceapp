@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, writeFileSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { cp, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -22,6 +22,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const SESSION_COOKIE = "space_session_dev";
 const SUPERVISOR_LOG = "/tmp/spaceapp-dev-stack-supervisor.log";
 const TRANSCRIPT = "/tmp/spaceapp-dev-stack-linux-transcript.txt";
+const LOG_SNAPSHOT = "/tmp/spaceapp-dev-stack-logs";
 
 export function sessionCookieFrom(setCookieLines, name) {
   for (const line of setCookieLines) {
@@ -309,6 +310,8 @@ async function main() {
     if (!secrets.length) secrets = await secretValues(root).catch(() => []);
     const earlyLog = scrubSecrets(supervisor.capturedOutput?.() ?? "", secrets);
     if (earlyLog.trim()) say(`----- supervisor log -----\n${earlyLog.slice(-20000)}\n----- end supervisor log -----`);
+    const copied = await cp(join(root, "logs"), LOG_SNAPSHOT, { recursive: true, force: true }).then(() => true, () => false);
+    if (copied) say(`dev-stack gate: saved process logs to ${LOG_SNAPSHOT}`);
     say("dev-stack gate: resetting");
     const reset = spawn(process.execPath, [join(scriptDir, "dev-stack.mjs"), "reset"], {
       cwd: repoRoot,

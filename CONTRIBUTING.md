@@ -95,7 +95,13 @@ Colima and Lima forward a guest port to `127.0.0.1` on the Mac only when the
 guest listens on the VM's interfaces. A publish address of `127.0.0.1` stays
 inside the VM, so when the Docker context is Colima or Lima this command
 publishes the guest port without a host address. The Mac still listens on
-`127.0.0.1` only:
+`127.0.0.1` only.
+
+On macOS, `node-pty` starts each CLI pane by `posix_spawn` of `spawn-helper`
+next to its native module. The file published in the npm package is mode
+`0644`, so that spawn fails with `posix_spawnp failed.` and the OpenCode pane
+stays idle. `dev:stack` sets the helper to mode `0755` before it starts the
+CLI host, and clears a download quarantine attribute when one is present.
 
 | Service   | Default | Override                      |
 | --------- | ------- | ----------------------------- |

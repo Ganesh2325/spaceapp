@@ -14,7 +14,7 @@ import {
   stat,
   writeFile
 } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { arch, homedir, platform, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -140,6 +140,50 @@ export function assertSafeStateDir(stateDir, root = repoRoot) {
   const problems = stateDirPathProblems(stateDir, root);
   if (problems.length) throw new Error(problems.join(" "));
   return resolve(stateDir);
+}
+
+export function nodePtySpawnHelperPaths(root = repoRoot, platformName = platform(), archName = arch()) {
+  // node-pty loads build/Release, then build/Debug, then prebuilds/<platform>-<arch>,
+  // and posix_spawns the spawn-helper that sits next to the .node file it loaded.
+  const base = join(root, "node_modules", "node-pty");
+  return [
+    join(base, "build", "Release", "spawn-helper"),
+    join(base, "build", "Debug", "spawn-helper"),
+    join(base, "prebuilds", `${platformName}-${archName}`, "spawn-helper")
+  ];
+}
+
+export async function ensureNodePtySpawnHelper({
+  root = repoRoot,
+  platformName = platform(),
+  archName = arch()
+} = {}) {
+  // The npm package ships this Mach-O as mode 0644. Apple's pty path then
+  // throws "posix_spawnp failed." and the OpenCode pane never leaves IDLE.
+  if (platformName !== "darwin") return [];
+  const noted = [];
+  for (const file of nodePtySpawnHelperPaths(root, platformName, archName)) {
+    let info;
+    try {
+      info = await stat(file);
+    } catch {
+      continue;
+    }
+    if (!info.isFile()) continue;
+    const mode = info.mode & 0o777;
+    if ((mode & 0o111) === 0o111) {
+      noted.push({ file, action: "already-executable", mode });
+    } else {
+      await chmod(file, 0o755);
+      noted.push({ file, action: "chmod", mode });
+    }
+    if (platform() === "darwin") {
+      await execFile("xattr", ["-d", "com.apple.quarantine", file]).catch(() => {});
+      await execFile("codesign", ["--force", "--sign", "-", file]).catch(() => {});
+      await chmod(file, 0o755);
+    }
+  }
+  return noted;
 }
 
 export async function composeUsesGuestPortForward(env = process.env) {
@@ -625,6 +669,11 @@ async function runUp(stateDir) {
   const children = [];
   const logDir = paths.logs;
   await mkdir(logDir, { recursive: true, mode: 0o700 });
+  for (const helper of await ensureNodePtySpawnHelper()) {
+    const mode = helper.mode.toString(8);
+    const detail = helper.action === "chmod" ? `mode ${mode} is not executable; chmod 0755` : `mode ${mode}`;
+    writeLine(1, `dev-stack: node-pty spawn-helper ${helper.file} ${detail}`);
+  }
   for (const name of ["cli-host", "api", "worker", "web"]) {
     const spec = commands[name];
     const logPath = join(logDir, `${name}.log`);

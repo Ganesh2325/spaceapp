@@ -90,7 +90,15 @@ jobs:
       - name: Run the dev stack and reset it
         run: |
           set -o pipefail
-          node scripts/ci-dev-stack-gate.mjs 2>&1 | tee "$RUNNER_TEMP/macos-dev-stack-transcript.txt"
+          {
+            echo "===== node-pty spawn-helper before dev-stack ====="
+            ls -l node_modules/node-pty/prebuilds/darwin-x64/spawn-helper node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper node_modules/node-pty/build/Release/spawn-helper || true
+            echo "===== host ====="
+            uname -a
+            sw_vers
+            echo "===== gate ====="
+            node scripts/ci-dev-stack-gate.mjs
+          } 2>&1 | tee "$RUNNER_TEMP/macos-dev-stack-transcript.txt"
 
       - name: Upload the macOS transcript
         if: always()
@@ -98,11 +106,12 @@ jobs:
         with:
           name: macos-dev-stack-transcript
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 90
           path: |
             ${{ runner.temp }}/macos-dev-stack-transcript.txt
             /tmp/spaceapp-dev-stack-supervisor.log
             /tmp/spaceapp-dev-stack-linux-transcript.txt
+            /tmp/spaceapp-dev-stack-logs
 
       - name: Stop Colima
         if: always()

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -16,11 +16,13 @@ import {
   composeUsesGuestPortForward,
   cwdBelongsToState,
   devProcessEnv,
+  ensureNodePtySpawnHelper,
   ensureSecrets,
   executableBelongsToState,
   failureLine,
   installedPathFallbacks,
   parseComposeImages,
+  nodePtySpawnHelperPaths,
   parseOpenCodePackage,
   pullFailureIsTransient,
   parseProcStat,
@@ -88,6 +90,25 @@ test("dev-stack ports default off the installed app and stay on loopback", async
   assert.equal(await composeUsesGuestPortForward({ DOCKER_CONTEXT: "colima" }), true);
   assert.equal(await composeUsesGuestPortForward({ DOCKER_HOST: "unix:///Users/runner/.colima/default/docker.sock" }), true);
   assert.equal(await composeUsesGuestPortForward({ DOCKER_CONTEXT: "default" }), false);
+});
+
+test("macOS node-pty spawn-helper is made executable before a pane can start", async () => {
+  const root = await mkdtemp(join(tmpdir(), "spaceapp-pty-"));
+  try {
+    const helper = join(root, "node_modules", "node-pty", "prebuilds", "darwin-x64", "spawn-helper");
+    await mkdir(join(helper, ".."), { recursive: true });
+    await writeFile(helper, "not a real binary\n", { mode: 0o644 });
+    await chmod(helper, 0o644);
+    const first = await ensureNodePtySpawnHelper({ root, platformName: "darwin", archName: "x64" });
+    assert.equal((await stat(helper)).mode & 0o777, 0o755);
+    assert.equal(first.some((item) => item.file === helper && item.action === "chmod" && item.mode === 0o644), true);
+    const second = await ensureNodePtySpawnHelper({ root, platformName: "darwin", archName: "x64" });
+    assert.equal(second.some((item) => item.file === helper && item.action === "already-executable"), true);
+    assert.deepEqual(await ensureNodePtySpawnHelper({ root, platformName: "linux", archName: "x64" }), []);
+    assert.deepEqual(nodePtySpawnHelperPaths(root, "darwin", "arm64").at(-1), join(root, "node_modules", "node-pty", "prebuilds", "darwin-arm64", "spawn-helper"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("state directories cannot replace the checkout, home, or an install path", () => {
