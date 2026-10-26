@@ -9,6 +9,7 @@ import {
   copyFile,
   mkdir,
   readFile,
+  readdir,
   readlink,
   rm,
   stat,
@@ -140,6 +141,18 @@ export function assertSafeStateDir(stateDir, root = repoRoot) {
   const problems = stateDirPathProblems(stateDir, root);
   if (problems.length) throw new Error(problems.join(" "));
   return resolve(stateDir);
+}
+
+export async function assertClaimableStateDir(root) {
+  let entries;
+  try {
+    entries = await readdir(root);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  if (entries.length === 0 || entries.includes("OWNED")) return;
+  throw new Error(`Refusing to use ${root}: it is not empty and is not a dev-stack state directory.`);
 }
 
 export function nodePtySpawnHelperPaths(root = repoRoot, platformName = platform(), archName = arch()) {
@@ -603,6 +616,7 @@ function writeLine(fd, text) {
 async function runUp(stateDir) {
   assertSafeStateDir(stateDir);
   const paths = layout(stateDir);
+  await assertClaimableStateDir(paths.root);
   await mkdir(paths.secrets, { recursive: true, mode: 0o700 });
   await chmod(paths.secrets, 0o700);
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
@@ -657,45 +671,19 @@ async function runUp(stateDir) {
     const tail = scrubSecrets(`${logs.stdout}\n${logs.stderr}`, [secrets.password, secrets.sessionSecret, secrets.setupToken]).slice(-4000);
     throw new Error(`${message}\n----- compose logs -----\n${tail}`);
   }
-  await ensureTemporalNamespace(docker, paths.composeFile);
-  writeLine(1, "dev-stack: installing the pinned OpenCode CLI into the state directory");
-  await installOpenCode(paths, packageSpec, env);
-  writeLine(1, "dev-stack: building workspace packages and applying migrations");
-  await buildPackages(env);
-  await runLogged(["npm", "run", "db:migrate"], [], { cwd: repoRoot, env });
-  await runLogged(["npm", "run", "build", "-w", "@space/worker"], [], { cwd: repoRoot, env });
-
-  const commands = serviceCommands({ ports });
   const children = [];
-  const logDir = paths.logs;
-  await mkdir(logDir, { recursive: true, mode: 0o700 });
-  for (const helper of await ensureNodePtySpawnHelper()) {
-    const mode = helper.mode.toString(8);
-    const detail = helper.action === "chmod" ? `mode ${mode} is not executable; chmod 0755` : `mode ${mode}`;
-    writeLine(1, `dev-stack: node-pty spawn-helper ${helper.file} ${detail}`);
-  }
-  for (const name of ["cli-host", "api", "worker", "web"]) {
-    const spec = commands[name];
-    const logPath = join(logDir, `${name}.log`);
-    const child = spawnLogged(process.execPath, spec.args, { cwd: spec.cwd, env, logPath });
-    const identity = await readProcessIdentity(child.pid);
-    children.push({ name, pid: child.pid, starttime: identity?.starttime ?? null, logPath, child });
-  }
-  const supervisorIdentity = await readProcessIdentity(process.pid);
-  const stack = {
+  let failure = null;
+  let shuttingDown = false;
+  let stack = {
     marker: STATE_MARKER,
     project: COMPOSE_PROJECT,
-    supervisorPid: process.pid,
-    supervisorStarttime: supervisorIdentity?.starttime ?? null,
+    supervisorPid: null,
+    supervisorStarttime: null,
     ports,
     socketPath,
     composeFile: paths.composeFile,
-    children: children.map(({ name, pid, starttime, logPath }) => ({ name, pid, starttime, logPath }))
+    children: []
   };
-  await writeFile(paths.stackFile, `${JSON.stringify(stack, null, 2)}\n`, { mode: 0o600 });
-
-  let shuttingDown = false;
-  let failure = null;
   const shutdown = async (status) => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -711,35 +699,66 @@ async function runUp(stateDir) {
     process.exit(status);
   };
   requestShutdown = shutdown;
-
-  bindChildFailure(children, (line, record) => {
-    if (shuttingDown || failure) return;
-    failure = line;
-    writeLine(2, line);
-    const tail = tailFile(record.logPath);
-    if (tail) writeLine(2, scrubSecrets(tail));
-    void shutdown(1);
-  });
   process.once("SIGINT", () => { writeLine(1, "dev-stack: stopping"); void shutdown(0); });
   process.once("SIGTERM", () => { void shutdown(0); });
-  process.on("SIGUSR1", () => {
-    if (shuttingDown) return;
-    void restartBuiltServices(children, commands, env, logDir, paths).catch((error) => {
-      failure = `dev-stack: rebuild restart failed: ${error instanceof Error ? error.message : error}`;
-      writeLine(2, failure);
-      void shutdown(1);
-    });
-  });
 
   try {
+    await ensureTemporalNamespace(docker, paths.composeFile);
+    writeLine(1, "dev-stack: installing the pinned OpenCode CLI into the state directory");
+    await installOpenCode(paths, packageSpec, env);
+    writeLine(1, "dev-stack: building workspace packages and applying migrations");
+    await buildPackages(env);
+    await runLogged(["npm", "run", "db:migrate"], [], { cwd: repoRoot, env });
+    await runLogged(["npm", "run", "build", "-w", "@space/worker"], [], { cwd: repoRoot, env });
+
+    const commands = serviceCommands({ ports });
+    const logDir = paths.logs;
+    await mkdir(logDir, { recursive: true, mode: 0o700 });
+    for (const helper of await ensureNodePtySpawnHelper()) {
+      const mode = helper.mode.toString(8);
+      const detail = helper.action === "chmod" ? `mode ${mode} is not executable; chmod 0755` : `mode ${mode}`;
+      writeLine(1, `dev-stack: node-pty spawn-helper ${helper.file} ${detail}`);
+    }
+    for (const name of ["cli-host", "api", "worker", "web"]) {
+      const spec = commands[name];
+      const logPath = join(logDir, `${name}.log`);
+      const child = spawnLogged(process.execPath, spec.args, { cwd: spec.cwd, env, logPath });
+      const identity = await readProcessIdentity(child.pid);
+      children.push({ name, pid: child.pid, starttime: identity?.starttime ?? null, logPath, child });
+    }
+    const supervisorIdentity = await readProcessIdentity(process.pid);
+    stack = {
+      ...stack,
+      supervisorPid: process.pid,
+      supervisorStarttime: supervisorIdentity?.starttime ?? null,
+      children: children.map(({ name, pid, starttime, logPath }) => ({ name, pid, starttime, logPath }))
+    };
+    await writeFile(paths.stackFile, `${JSON.stringify(stack, null, 2)}\n`, { mode: 0o600 });
+
+    bindChildFailure(children, (line, record) => {
+      if (shuttingDown || failure) return;
+      failure = line;
+      writeLine(2, line);
+      const tail = tailFile(record.logPath);
+      if (tail) writeLine(2, scrubSecrets(tail));
+      void shutdown(1);
+    });
+    process.on("SIGUSR1", () => {
+      if (shuttingDown) return;
+      void restartBuiltServices(children, commands, env, logDir, paths).catch((error) => {
+        failure = `dev-stack: rebuild restart failed: ${error instanceof Error ? error.message : error}`;
+        writeLine(2, failure);
+        void shutdown(1);
+      });
+    });
+
     await waitForReady(`http://127.0.0.1:${ports.api}/readyz`, children, 240_000);
+    await printBanner(ports, secrets, paths);
+    await new Promise(() => {});
   } catch (error) {
     writeLine(2, `dev-stack: ${error instanceof Error ? error.message : error}`);
     await shutdown(1);
-    return;
   }
-  await printBanner(ports, secrets, paths);
-  await new Promise(() => {});
 }
 
 async function restartBuiltServices(children, commands, env, logDir, paths) {
@@ -1207,7 +1226,7 @@ function execFile(command, args) {
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     child.once("error", reject);
-    child.once("exit", (status) => resolvePromise({ status, stdout, stderr }));
+    child.once("close", (status) => resolvePromise({ status, stdout, stderr }));
   });
 }
 
@@ -1229,7 +1248,7 @@ function runLogged(argv, args, { cwd = repoRoot, env = process.env, allowFailure
       if (allowFailure) resolvePromise({ status: 127, stdout, stderr: error.message });
       else reject(error);
     });
-    child.once("exit", (status) => {
+    child.once("close", (status) => {
       if (status !== 0 && !allowFailure) {
         reject(new Error(`${argv.join(" ")} ${args.join(" ")} failed (${status})\n${scrubSecrets(`${stdout}\n${stderr}`).slice(-4000)}`));
         return;

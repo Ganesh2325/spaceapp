@@ -10,6 +10,7 @@ import {
   DEFAULT_PORTS,
   DOWN_COMPOSE_ARGS,
   RESET_COMPOSE_ARGS,
+  assertClaimableStateDir,
   assertSafeStateDir,
   bindChildFailure,
   composeArgs,
@@ -109,6 +110,45 @@ test("macOS node-pty spawn-helper is made executable before a pane can start", a
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("a non-empty state directory without OWNED is refused", async () => {
+  const root = await mkdtemp(join(tmpdir(), "spaceapp-dev-claim-"));
+  try {
+    await assertClaimableStateDir(join(root, "missing"));
+    const empty = join(root, "empty");
+    await mkdir(empty);
+    await assertClaimableStateDir(empty);
+    const owned = join(root, "owned");
+    await mkdir(owned);
+    await writeFile(join(owned, "OWNED"), "marker\n");
+    await writeFile(join(owned, "notes.txt"), "keep\n");
+    await assertClaimableStateDir(owned);
+    const dirty = join(root, "dirty");
+    await mkdir(dirty);
+    await writeFile(join(dirty, "notes.txt"), "keep\n");
+    await assert.rejects(() => assertClaimableStateDir(dirty), /not empty and is not a dev-stack state directory/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("compose cleanup is registered before steps that follow compose up", () => {
+  const start = scriptSource.indexOf("async function runUp");
+  const end = scriptSource.indexOf("async function restartBuiltServices");
+  const up = scriptSource.slice(start, end);
+  const shutdown = up.indexOf("const shutdown = async");
+  const namespace = up.indexOf("await ensureTemporalNamespace");
+  const install = up.indexOf("await installOpenCode");
+  const build = up.indexOf("await buildPackages");
+  const migrate = up.indexOf('await runLogged(["npm", "run", "db:migrate"]');
+  const ready = up.indexOf("await waitForReady");
+  assert.ok(shutdown !== -1 && shutdown < namespace);
+  assert.ok(namespace < install && install < build && build < migrate && migrate < ready);
+  assert.match(up.slice(shutdown, namespace), /DOWN_COMPOSE_ARGS/);
+  const failure = up.lastIndexOf("} catch (error) {");
+  assert.ok(failure > ready);
+  assert.match(up.slice(failure), /await shutdown\(1\)/);
 });
 
 test("state directories cannot replace the checkout, home, or an install path", () => {
@@ -222,7 +262,7 @@ test("a child exit is reported instead of leaving the stack half running", async
   assert.match(failureLine("api", null, "SIGTERM", "/tmp/api.log"), /signal SIGTERM/);
 });
 
-test("process identity uses start time, so a recycled pid is not killed", async () => {
+test("process identity uses start time, so a recycled pid is not killed", { skip: process.platform !== "linux" }, async () => {
   const parsed = parseProcStat(await readFile("/proc/self/stat", "utf8"));
   assert.equal(typeof parsed.starttime, "string");
   assert.ok(parsed.starttime.length > 0);
