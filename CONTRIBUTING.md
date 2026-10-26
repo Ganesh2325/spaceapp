@@ -90,7 +90,12 @@ Docker uses the compose project `spaceapp-devstack` and the image digests in
 `.dev-stack/secrets/` with mode `0600`. The database password and session
 secret stay there. Only the setup token is written to the terminal.
 
-Ports bind to `127.0.0.1` and stay off the installed app's `4910` and `4911`:
+Ports bind to `127.0.0.1` and stay off the installed app's `4910` and `4911`.
+Colima and Lima forward a guest port to `127.0.0.1` on the Mac only when the
+guest listens on the VM's interfaces. A publish address of `127.0.0.1` stays
+inside the VM, so when the Docker context is Colima or Lima this command
+publishes the guest port without a host address. The Mac still listens on
+`127.0.0.1` only:
 
 | Service   | Default | Override                      |
 | --------- | ------- | ----------------------------- |

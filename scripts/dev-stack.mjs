@@ -142,10 +142,33 @@ export function assertSafeStateDir(stateDir, root = repoRoot) {
   return resolve(stateDir);
 }
 
-export function renderCompose({ images, ports, project = COMPOSE_PROJECT }) {
+export async function composeUsesGuestPortForward(env = process.env) {
+  // Lima forwards guest ports that listen on the VM's interfaces to 127.0.0.1
+  // on the Mac. A compose publish of 127.0.0.1 stays on the guest loopback,
+  // so the Mac never sees Postgres or Temporal.
+  if (env.SPACE_DEV_STACK_PUBLISH === "guest") return true;
+  if (env.SPACE_DEV_STACK_PUBLISH === "loopback") return false;
+  const hinted = `${env.DOCKER_HOST || ""} ${env.DOCKER_CONTEXT || ""}`;
+  if (/colima|lima/i.test(hinted)) return true;
+  if (env !== process.env) return false;
+  try {
+    const { status, stdout } = await execFile("docker", ["context", "show"]);
+    return status === 0 && /colima|lima/i.test(stdout);
+  } catch {
+    return false;
+  }
+}
+
+function publishedPort(guestPortForward, hostPort, containerPort) {
+  return guestPortForward ? `${hostPort}:${containerPort}` : `127.0.0.1:${hostPort}:${containerPort}`;
+}
+
+export function renderCompose({ images, ports, project = COMPOSE_PROJECT, guestPortForward = false }) {
   if (project !== COMPOSE_PROJECT && !/^[a-z0-9][a-z0-9_-]{0,40}$/.test(project)) {
     throw new Error("Compose project name must be a short lowercase token.");
   }
+  const postgresPort = publishedPort(guestPortForward, ports.postgres, 5432);
+  const temporalPort = publishedPort(guestPortForward, ports.temporal, 7233);
   return `name: ${project}
 services:
   postgres:
@@ -156,7 +179,7 @@ services:
       POSTGRES_USER: ${DATABASE_USER}
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
     ports:
-      - "127.0.0.1:${ports.postgres}:5432"
+      - "${postgresPort}"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     secrets:
@@ -194,7 +217,7 @@ services:
         rm -f /tmp/postgres-password
         exec su temporal -c 'exec /etc/temporal/entrypoint.sh autosetup'
     ports:
-      - "127.0.0.1:${ports.temporal}:7233"
+      - "${temporalPort}"
     secrets:
       - postgres-password
     healthcheck:
@@ -564,7 +587,11 @@ async function runUp(stateDir) {
     sessionSecret: secrets.sessionSecret
   });
   await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
-  await writeFile(paths.composeFile, renderCompose({ images, ports }), { mode: 0o600 });
+  const guestPortForward = await composeUsesGuestPortForward();
+  if (guestPortForward) {
+    writeLine(1, "dev-stack: Colima forwards guest ports to 127.0.0.1 on this machine.");
+  }
+  await writeFile(paths.composeFile, renderCompose({ images, ports, guestPortForward }), { mode: 0o600 });
   await writeWrapper(paths, packageSpec);
   await copyStarterMemory(join(paths.varRoot, "memory"));
   await ensureDirectories(paths, socketPath);
@@ -1074,6 +1101,11 @@ async function processWorkingDirectory(pid) {
 async function processExecutable(pid) {
   try {
     if (process.platform === "linux") return await readlink(`/proc/${pid}/exe`);
+    if (process.platform === "darwin") {
+      const { status, stdout } = await execFile("lsof", ["-a", "-p", String(pid), "-d", "txt", "-Fn"]);
+      if (status !== 0) return null;
+      return stdout.split("\n").find((line) => line.startsWith("n"))?.slice(1) ?? null;
+    }
   } catch {
     return null;
   }

@@ -7,7 +7,7 @@ Semantic Versioning.
 
 ### Contributors
 
-- `npm run dev:stack` runs PostgreSQL, Temporal, the API, the web app, the worker, and the CLI host from a checkout. `down` stops that stack and `reset` removes only what it created.
+- `npm run dev:stack` runs PostgreSQL, Temporal, the API, the web app, the worker, and the CLI host from a checkout. `down` stops that stack and `reset` removes only what it created. On Colima or Lima, Postgres and Temporal are published so the VM port forward reaches `127.0.0.1` on the Mac.
 
 ## [1.1.8] - 2026-10-25
 

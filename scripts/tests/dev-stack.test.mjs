@@ -13,6 +13,7 @@ import {
   assertSafeStateDir,
   bindChildFailure,
   composeArgs,
+  composeUsesGuestPortForward,
   cwdBelongsToState,
   devProcessEnv,
   ensureSecrets,
@@ -53,7 +54,7 @@ test("image pins and the OpenCode version are read from the shared files", () =>
   assert.throws(() => parseOpenCodePackage("FROM scratch\n"), /Dockerfile must pin/);
 });
 
-test("dev-stack ports default off the installed app and stay on loopback", () => {
+test("dev-stack ports default off the installed app and stay on loopback", async () => {
   assert.deepEqual(resolvePorts({}), DEFAULT_PORTS);
   assert.equal(DEFAULT_PORTS.api === 4910 || DEFAULT_PORTS.web === 4911, false);
   const overridden = resolvePorts({
@@ -77,6 +78,16 @@ test("dev-stack ports default off the installed app and stay on loopback", () =>
   assert.match(rendered, /POSTGRES_PASSWORD_FILE/);
   assert.match(rendered, /user: root/);
   assert.match(rendered, /exec su temporal -c 'exec \/etc\/temporal\/entrypoint.sh autosetup'/);
+  const forwarded = renderCompose({ images: parseComposeImages(composeText), ports: DEFAULT_PORTS, guestPortForward: true });
+  assert.match(forwarded, /"55432:5432"/);
+  assert.match(forwarded, /"57233:7233"/);
+  assert.equal(forwarded.includes("127.0.0.1:"), false);
+  assert.equal(forwarded.includes("0.0.0.0:"), false);
+  assert.equal(await composeUsesGuestPortForward({ SPACE_DEV_STACK_PUBLISH: "guest" }), true);
+  assert.equal(await composeUsesGuestPortForward({ SPACE_DEV_STACK_PUBLISH: "loopback", DOCKER_CONTEXT: "colima" }), false);
+  assert.equal(await composeUsesGuestPortForward({ DOCKER_CONTEXT: "colima" }), true);
+  assert.equal(await composeUsesGuestPortForward({ DOCKER_HOST: "unix:///Users/runner/.colima/default/docker.sock" }), true);
+  assert.equal(await composeUsesGuestPortForward({ DOCKER_CONTEXT: "default" }), false);
 });
 
 test("state directories cannot replace the checkout, home, or an install path", () => {
