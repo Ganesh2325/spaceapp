@@ -7,7 +7,7 @@ Semantic Versioning.
 
 ### Contributors
 
-- `npm run dev:stack` runs PostgreSQL, Temporal, the API, the web app, the worker, and the CLI host from a checkout. `down` stops that stack and `reset` removes only what it created. On Colima or Lima, Postgres and Temporal are published so the VM port forward reaches `127.0.0.1` on the Mac. On macOS, the command makes `node-pty`'s `spawn-helper` executable before the CLI host starts, because the published file is mode `0644` and OpenCode panes otherwise fail with `posix_spawnp failed.`
+- `npm run dev:stack` runs PostgreSQL, Temporal, the API, the web app, the worker, and the CLI host from a checkout. `down` stops that stack and `reset` removes only what it created. Published ports bind to `127.0.0.1`. The compose project and the short socket directory are named from the checkout path, so one checkout's reset does not remove another's volume or socket. The API, worker, and CLI host use `HOME` under `.dev-stack/home`. The shared OpenCode server listens on `54747` (`SPACE_DEV_STACK_OPENCODE_PORT`). On macOS, the command makes `node-pty`'s `spawn-helper` executable before the CLI host starts, because the published file is mode `0644` and OpenCode panes otherwise fail with `posix_spawnp failed.`
 
 ## [1.1.8] - 2026-10-25
 

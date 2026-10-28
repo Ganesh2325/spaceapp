@@ -85,17 +85,16 @@ and state directory this command created.
 
 Everything for this command lives under `.dev-stack/` (override with
 `SPACE_DEV_STACK_STATE_DIR` or `--state-dir`). That directory is gitignored.
-Docker uses the compose project `spaceapp-devstack` and the image digests in
-`packages/run-spaceapp/templates/compose.yml`. Secrets are created in
-`.dev-stack/secrets/` with mode `0600`. The database password and session
-secret stay there. Only the setup token is written to the terminal.
+Docker uses a compose project named `spaceapp-` plus ten hex characters of
+the checkout path, and the image digests in
+`packages/run-spaceapp/templates/compose.yml`. Two checkouts therefore do not
+share a volume. Secrets are created in `.dev-stack/secrets/` with mode `0600`.
+The database password and session secret stay there. Only the setup token is
+written to the terminal. The API, worker, and CLI host get a small environment
+with `HOME` under `.dev-stack/home`, not your own home directory.
 
-Ports bind to `127.0.0.1` and stay off the installed app's `4910` and `4911`.
-Colima and Lima forward a guest port to `127.0.0.1` on the Mac only when the
-guest listens on the VM's interfaces. A publish address of `127.0.0.1` stays
-inside the VM, so when the Docker context is Colima or Lima this command
-publishes the guest port without a host address. The Mac still listens on
-`127.0.0.1` only.
+Ports bind to `127.0.0.1` and stay off the installed app's `4910`, `4911`, and
+OpenCode port `47047`.
 
 On macOS, `node-pty` starts each CLI pane by `posix_spawn` of `spawn-helper`
 next to its native module. The file published in the npm package is mode
@@ -103,12 +102,13 @@ next to its native module. The file published in the npm package is mode
 stays idle. `dev:stack` sets the helper to mode `0755` before it starts the
 CLI host, and clears a download quarantine attribute when one is present.
 
-| Service   | Default | Override                      |
-| --------- | ------- | ----------------------------- |
-| Web       | 5911    | `SPACE_DEV_STACK_WEB_PORT`    |
-| API       | 5910    | `SPACE_DEV_STACK_API_PORT`    |
-| Postgres  | 55432   | `SPACE_DEV_STACK_POSTGRES_PORT` |
-| Temporal  | 57233   | `SPACE_DEV_STACK_TEMPORAL_PORT` |
+| Service   | Default | Override                         |
+| --------- | ------- | -------------------------------- |
+| Web       | 5911    | `SPACE_DEV_STACK_WEB_PORT`       |
+| API       | 5910    | `SPACE_DEV_STACK_API_PORT`       |
+| Postgres  | 55432   | `SPACE_DEV_STACK_POSTGRES_PORT`  |
+| Temporal  | 57233   | `SPACE_DEV_STACK_TEMPORAL_PORT`  |
+| OpenCode  | 54747   | `SPACE_DEV_STACK_OPENCODE_PORT`  |
 
 Saving a file under `apps/api/src` restarts the API. Saving a file under
 `apps/web/src` updates the browser through Vite. After a change under
@@ -121,15 +121,16 @@ binary is under `.dev-stack/tools/`, not on the system `PATH`.
 
 Troubleshooting:
 
-- `Docker Compose is required` means the daemon is stopped or `docker compose`
-  asked for a password. Start Docker Desktop, or `colima start` on macOS, then
-  retry. `sudo -n docker compose version` has to succeed if your user is not in
-  the `docker` group.
+- `Docker Compose is required` means the daemon is stopped or `docker info`
+  failed for your user. Start Docker Desktop, or `colima start` on macOS, then
+  retry. This command does not use `sudo`.
 - A port already in use fails the process that wanted it. Set the matching
   `SPACE_DEV_STACK_*_PORT` variable. Do not point this stack at `4910` or `4911`
   while an installed copy is running.
 - `CLI host socket path is too long` means the state directory is too deep for
-  a Unix socket. Export a short `TMPDIR` and start again.
+  a Unix socket. The fallback directory is `$TMPDIR/spaceapp-` plus the same
+  checkout hash, so one checkout's reset does not remove another's socket.
+  Export a short `TMPDIR` and start again.
 - If the API, worker, web app, or CLI host exits, the supervisor prints
   `dev-stack: <name> exited unexpectedly` and shuts the rest down. The log path
   is on that line, under `.dev-stack/logs/`. Fix the cause and run `dev:stack`

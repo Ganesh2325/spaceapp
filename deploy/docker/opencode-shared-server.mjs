@@ -64,8 +64,17 @@ async function withLock(directory, timeoutMs, work) {
   try { return await work(); } finally { await rm(lock, { recursive: true, force: true }); }
 }
 
+export function sharedServerPort(env = process.env) {
+  const raw = env.SPACE_DEV_STACK_OPENCODE_PORT;
+  if (raw === undefined || raw === "") return 47047;
+  if (!/^[0-9]+$/.test(String(raw))) throw new Error("SPACE_DEV_STACK_OPENCODE_PORT must be an integer port.");
+  const port = Number(raw);
+  if (port < 1 || port > 65535) throw new Error("SPACE_DEV_STACK_OPENCODE_PORT must be between 1 and 65535.");
+  return port;
+}
+
 /** Returns the shared server's URL and Basic auth; starts it when none is healthy or its keys and config changed. */
-export async function ensureSharedServer({ env = process.env, port = 47047, timeoutMs = 60_000 } = {}) {
+export async function ensureSharedServer({ env = process.env, port = sharedServerPort(env), timeoutMs = 60_000 } = {}) {
   const directory = join(env.XDG_STATE_HOME, 'opencode');
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const recordPath = join(directory, 'spaceapp-shared-server.json');
@@ -105,7 +114,7 @@ export async function ensureSharedServer({ env = process.env, port = 47047, time
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  ensureSharedServer().then(({ url, username, password }) => {
+  ensureSharedServer({ port: sharedServerPort(process.env) }).then(({ url, username, password }) => {
     process.stdout.write(`OPENCODE_SERVER_URL=${url}\nOPENCODE_SERVER_USERNAME=${username}\nOPENCODE_SERVER_PASSWORD=${password}\n`);
   }, (error) => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
 }

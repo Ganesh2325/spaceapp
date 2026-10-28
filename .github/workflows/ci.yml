@@ -79,6 +79,7 @@ jobs:
         run: ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm ci
 
       # No TTY: the gate spawns the supervisor with piped logs, then checks
-      # /readyz, owner setup, a running OpenCode pane, and a clean reset.
+      # /readyz, owner setup, a running OpenCode pane, an API restart, a Vite
+      # hot update, a worker failure, and a clean reset.
       - name: Run the dev stack and reset it
-        run: node scripts/ci-dev-stack-gate.mjs
+        run: node scripts/ci-dev-stack-gate.mjs --exercise-reload

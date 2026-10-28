@@ -4,19 +4,21 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/pr
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { sessionCookieFrom, terminalFrameText, terminalSocketUrl } from "../ci-dev-stack-gate.mjs";
+import { sessionCookieFrom, terminalFrameText, terminalSocketUrl, viteHotUpdate } from "../ci-dev-stack-gate.mjs";
 import {
-  COMPOSE_PROJECT,
   DEFAULT_PORTS,
   DOWN_COMPOSE_ARGS,
   RESET_COMPOSE_ARGS,
   assertClaimableStateDir,
   assertSafeStateDir,
   bindChildFailure,
+  chooseSocketPath,
   composeArgs,
-  composeUsesGuestPortForward,
+  composeProjectName,
   cwdBelongsToState,
   devProcessEnv,
+  devStackOwnedProcesses,
+  fallbackSocketDirectory,
   ensureNodePtySpawnHelper,
   ensureSecrets,
   executableBelongsToState,
@@ -70,27 +72,33 @@ test("dev-stack ports default off the installed app and stay on loopback", async
   assert.throws(() => resolvePorts({ SPACE_DEV_STACK_API_PORT: "5910", SPACE_DEV_STACK_WEB_PORT: "5910" }), /unique/);
   assert.throws(() => resolvePorts({ SPACE_DEV_STACK_API_PORT: "nope" }), /integer/);
   const rendered = renderCompose({ images: parseComposeImages(composeText), ports: DEFAULT_PORTS });
-  assert.match(rendered, new RegExp(`^name: ${COMPOSE_PROJECT}$`, "m"));
+  const project = composeProjectName(repoRoot);
+  assert.match(project, /^spaceapp-[a-f0-9]{10}$/);
+  assert.equal(composeProjectName("/tmp/spaceapp-checkout-a"), composeProjectName("/tmp/spaceapp-checkout-a"));
+  assert.notEqual(composeProjectName("/tmp/spaceapp-checkout-a"), composeProjectName("/tmp/spaceapp-checkout-b"));
+  assert.match(rendered, new RegExp(`^name: ${project}$`, "m"));
   assert.equal(rendered.includes("profiles:"), false);
   assert.equal(rendered.includes("postgres://"), false);
   assert.equal(rendered.includes("0.0.0.0:"), false);
-  for (const port of Object.values(DEFAULT_PORTS)) {
-    if (port === DEFAULT_PORTS.api || port === DEFAULT_PORTS.web) continue;
+  assert.equal(rendered.includes('"55432:5432"'), false);
+  assert.equal(DEFAULT_PORTS.opencode === 47047, false);
+  assert.equal(resolvePorts({}).opencode, 54747);
+  assert.equal(resolvePorts({ SPACE_DEV_STACK_OPENCODE_PORT: "18083", SPACE_DEV_STACK_API_PORT: "18084", SPACE_DEV_STACK_WEB_PORT: "18085", SPACE_DEV_STACK_POSTGRES_PORT: "18086", SPACE_DEV_STACK_TEMPORAL_PORT: "18087" }).opencode, 18083);
+  for (const [name, port] of Object.entries(DEFAULT_PORTS)) {
+    if (name === "api" || name === "web" || name === "opencode") continue;
     assert.match(rendered, new RegExp(`127\\.0\\.0\\.1:${port}:`));
   }
   assert.match(rendered, /POSTGRES_PASSWORD_FILE/);
   assert.match(rendered, /user: root/);
   assert.match(rendered, /exec su temporal -c 'exec \/etc\/temporal\/entrypoint.sh autosetup'/);
-  const forwarded = renderCompose({ images: parseComposeImages(composeText), ports: DEFAULT_PORTS, guestPortForward: true });
-  assert.match(forwarded, /"55432:5432"/);
-  assert.match(forwarded, /"57233:7233"/);
-  assert.equal(forwarded.includes("127.0.0.1:"), false);
-  assert.equal(forwarded.includes("0.0.0.0:"), false);
-  assert.equal(await composeUsesGuestPortForward({ SPACE_DEV_STACK_PUBLISH: "guest" }), true);
-  assert.equal(await composeUsesGuestPortForward({ SPACE_DEV_STACK_PUBLISH: "loopback", DOCKER_CONTEXT: "colima" }), false);
-  assert.equal(await composeUsesGuestPortForward({ DOCKER_CONTEXT: "colima" }), true);
-  assert.equal(await composeUsesGuestPortForward({ DOCKER_HOST: "unix:///Users/runner/.colima/default/docker.sock" }), true);
-  assert.equal(await composeUsesGuestPortForward({ DOCKER_CONTEXT: "default" }), false);
+  const deep = `/${"d".repeat(120)}`;
+  const first = chooseSocketPath(deep, "/work/checkout-a", "/tmp");
+  const second = chooseSocketPath(deep, "/work/checkout-b", "/tmp");
+  assert.equal(first, join(fallbackSocketDirectory("/work/checkout-a", "/tmp"), "host.sock"));
+  assert.notEqual(first, second);
+  assert.equal(first.includes("spaceapp-dev-stack"), false);
+  assert.equal(scriptSource.includes("sudo -n docker"), false);
+  assert.equal(scriptSource.includes("SPACE_DEV_STACK_PUBLISH"), false);
 });
 
 test("macOS node-pty spawn-helper is made executable before a pane can start", async () => {
@@ -182,12 +190,25 @@ test("process environment stays off dev-login and off installed paths", () => {
   process.env.SPACE_DEV_LOGIN = "true";
   try {
     const ports = resolvePorts({});
+    const stateDir = join(tmpdir(), "spaceapp-dev-env");
     const { env, overrides } = devProcessEnv({
-      stateDir: join(tmpdir(), "spaceapp-dev-env"),
+      stateDir,
       ports,
       databaseUrl: "postgres://spaceapp:secret-value@127.0.0.1:55432/spaceapp",
-      sessionSecret: "s".repeat(32)
+      sessionSecret: "s".repeat(32),
+      sourceEnv: {
+        PATH: "/usr/bin",
+        HOME: "/home/someone",
+        AWS_SECRET_ACCESS_KEY: "not-for-the-stack",
+        SPACE_DEV_LOGIN: "true",
+        LANG: "C.UTF-8"
+      }
     });
+    assert.equal(env.HOME, join(stateDir, "home"));
+    assert.equal(env.HOME.includes("/home/someone"), false);
+    assert.equal(Object.hasOwn(env, "AWS_SECRET_ACCESS_KEY"), false);
+    assert.equal(env.PATH, "/usr/bin");
+    assert.equal(env.LANG, "C.UTF-8");
     assert.equal(env.SPACE_DEV_LOGIN, "false");
     assert.equal(env.SPACE_INSTANCE, "dev");
     assert.equal(env.SPACEAPP_WORKFLOWS_ENABLED, "true");
@@ -220,7 +241,7 @@ test("the API is watched from source and the web app binds loopback", () => {
 
 test("the OpenCode wrapper keeps provider state in the dev-stack directory", () => {
   const stateDir = join(tmpdir(), "spaceapp-dev-wrapper");
-  const text = renderOpenCodeWrapper({ stateDir, repo: repoRoot, packageSpec: "@opencode/cli@9.9.9" });
+  const text = renderOpenCodeWrapper({ stateDir, repo: repoRoot, packageSpec: "@opencode/cli@9.9.9", openCodePort: 54747 });
   assert.match(text, /printf 'READY\\n'/);
   assert.match(text, new RegExp(stateDir.replaceAll("\\", "\\\\")));
   assert.match(text, /cli-state\/providers\/opencode/);
@@ -229,6 +250,7 @@ test("the OpenCode wrapper keeps provider state in the dev-stack directory", () 
   assert.match(text, /sha256sum|shasum -a 256/);
   assert.match(text, /opencode-first-run\.mjs/);
   assert.match(text, /--server/);
+  assert.match(text, /SPACE_DEV_STACK_OPENCODE_PORT="54747"/);
 });
 
 test("logs drop database URLs and the setup token", () => {
@@ -248,8 +270,9 @@ test("logs drop database URLs and the setup token", () => {
 test("down keeps volumes and reset removes them", () => {
   assert.equal(DOWN_COMPOSE_ARGS.includes("-v"), false);
   assert.equal(RESET_COMPOSE_ARGS.includes("-v"), true);
-  const args = composeArgs("/tmp/compose.yml", COMPOSE_PROJECT, ...RESET_COMPOSE_ARGS);
-  assert.deepEqual(args.slice(0, 4), ["-p", COMPOSE_PROJECT, "-f", "/tmp/compose.yml"]);
+  const project = composeProjectName("/work/one-checkout");
+  const args = composeArgs("/tmp/compose.yml", project, ...RESET_COMPOSE_ARGS);
+  assert.deepEqual(args.slice(0, 4), ["-p", project, "-f", "/tmp/compose.yml"]);
 });
 
 test("a child exit is reported instead of leaving the stack half running", async () => {
@@ -293,6 +316,30 @@ test("image pull retries only transient registry failures", () => {
   assert.equal(pullFailureIsTransient("toomanyrequests: You have reached your pull rate limit"), true);
   assert.equal(pullFailureIsTransient("manifest unknown"), false);
   assert.equal(pullFailureIsTransient("postgres-password must be mode 0600."), false);
+});
+
+test("a process whose cwd is the state directory is part of the cleanup check", { skip: process.platform !== "linux" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "spaceapp-dev-owned-proc-"));
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd: root, stdio: "ignore" });
+  const outside = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd: tmpdir(), stdio: "ignore" });
+  try {
+    const recordDir = join(root, "cli-state", "providers", "opencode", "state", "opencode");
+    await mkdir(recordDir, { recursive: true });
+    await writeFile(join(recordDir, "spaceapp-shared-server.json"), `${JSON.stringify({ pid: child.pid, port: 54747 })}\n`);
+    const found = await devStackOwnedProcesses(root);
+    assert.equal(found.some((record) => record.pid === child.pid && record.name === "opencode-server"), true);
+    assert.equal(found.some((record) => record.pid === outside.pid), false);
+  } finally {
+    child.kill("SIGKILL");
+    outside.kill("SIGKILL");
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a Vite full reload is not a hot update", () => {
+  assert.equal(viteHotUpdate(['{"type":"connected"}', '{"type":"update","updates":[]}']), "update");
+  assert.equal(viteHotUpdate(['{"type":"full-reload","path":"/src/features/SurfaceErrorBoundary.tsx"}']), "full-reload");
+  assert.equal(viteHotUpdate(['{"type":"connected"}']), null);
 });
 
 test("the gate reads the session cookie and builds a loopback terminal socket", () => {

@@ -2,7 +2,7 @@
 // One command for a contributor checkout: Postgres and Temporal in Docker, then the
 // API, web, worker and CLI host from this tree. State stays under .dev-stack/.
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import {
   chmod,
@@ -23,7 +23,21 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 export const repoRoot = resolve(scriptDir, "..");
 
-export const COMPOSE_PROJECT = "spaceapp-devstack";
+export function checkoutScope(root = repoRoot) {
+  return createHash("sha256").update(resolve(root)).digest("hex").slice(0, 10);
+}
+
+export function composeProjectName(root = repoRoot) {
+  const name = `spaceapp-${checkoutScope(root)}`;
+  if (!/^[a-z0-9][a-z0-9_-]{0,40}$/.test(name)) {
+    throw new Error("Compose project name must be a short lowercase token.");
+  }
+  return name;
+}
+
+export function fallbackSocketDirectory(root = repoRoot, temp = tmpdir()) {
+  return join(temp, `spaceapp-${checkoutScope(root)}`);
+}
 export const STATE_MARKER = "spaceapp-dev-stack";
 export const TEMPORAL_NAMESPACE = "spaceapp-dev";
 export const TEMPORAL_TASK_QUEUE = "spaceapp-dev-agent-turns";
@@ -34,11 +48,13 @@ export const DEFAULT_PORTS = {
   api: 5910,
   web: 5911,
   postgres: 55432,
-  temporal: 57233
+  temporal: 57233,
+  opencode: 54747
 };
 
 const INSTALLED_API_PORT = 4910;
 const INSTALLED_WEB_PORT = 4911;
+const INSTALLED_OPENCODE_PORT = 47047;
 const SOCKET_PATH_LIMIT = 100;
 
 const PACKAGE_BUILD_ORDER = [
@@ -97,7 +113,8 @@ export function resolvePorts(env = process.env) {
     api: portFrom(env.SPACE_DEV_STACK_API_PORT, DEFAULT_PORTS.api, "SPACE_DEV_STACK_API_PORT"),
     web: portFrom(env.SPACE_DEV_STACK_WEB_PORT, DEFAULT_PORTS.web, "SPACE_DEV_STACK_WEB_PORT"),
     postgres: portFrom(env.SPACE_DEV_STACK_POSTGRES_PORT, DEFAULT_PORTS.postgres, "SPACE_DEV_STACK_POSTGRES_PORT"),
-    temporal: portFrom(env.SPACE_DEV_STACK_TEMPORAL_PORT, DEFAULT_PORTS.temporal, "SPACE_DEV_STACK_TEMPORAL_PORT")
+    temporal: portFrom(env.SPACE_DEV_STACK_TEMPORAL_PORT, DEFAULT_PORTS.temporal, "SPACE_DEV_STACK_TEMPORAL_PORT"),
+    opencode: portFrom(env.SPACE_DEV_STACK_OPENCODE_PORT, DEFAULT_PORTS.opencode, "SPACE_DEV_STACK_OPENCODE_PORT")
   };
   const values = Object.values(ports);
   if (new Set(values).size !== values.length) {
@@ -108,6 +125,9 @@ export function resolvePorts(env = process.env) {
   }
   if (!env.SPACE_DEV_STACK_WEB_PORT && ports.web === INSTALLED_WEB_PORT) {
     throw new Error("The dev stack web port must not default to the installed app's 4911.");
+  }
+  if (!env.SPACE_DEV_STACK_OPENCODE_PORT && ports.opencode === INSTALLED_OPENCODE_PORT) {
+    throw new Error("The dev stack OpenCode port must not default to the installed app's 47047.");
   }
   return ports;
 }
@@ -199,33 +219,16 @@ export async function ensureNodePtySpawnHelper({
   return noted;
 }
 
-export async function composeUsesGuestPortForward(env = process.env) {
-  // Lima forwards guest ports that listen on the VM's interfaces to 127.0.0.1
-  // on the Mac. A compose publish of 127.0.0.1 stays on the guest loopback,
-  // so the Mac never sees Postgres or Temporal.
-  if (env.SPACE_DEV_STACK_PUBLISH === "guest") return true;
-  if (env.SPACE_DEV_STACK_PUBLISH === "loopback") return false;
-  const hinted = `${env.DOCKER_HOST || ""} ${env.DOCKER_CONTEXT || ""}`;
-  if (/colima|lima/i.test(hinted)) return true;
-  if (env !== process.env) return false;
-  try {
-    const { status, stdout } = await execFile("docker", ["context", "show"]);
-    return status === 0 && /colima|lima/i.test(stdout);
-  } catch {
-    return false;
-  }
+function publishedPort(hostPort, containerPort) {
+  return `127.0.0.1:${hostPort}:${containerPort}`;
 }
 
-function publishedPort(guestPortForward, hostPort, containerPort) {
-  return guestPortForward ? `${hostPort}:${containerPort}` : `127.0.0.1:${hostPort}:${containerPort}`;
-}
-
-export function renderCompose({ images, ports, project = COMPOSE_PROJECT, guestPortForward = false }) {
-  if (project !== COMPOSE_PROJECT && !/^[a-z0-9][a-z0-9_-]{0,40}$/.test(project)) {
+export function renderCompose({ images, ports, project = composeProjectName() }) {
+  if (!/^[a-z0-9][a-z0-9_-]{0,40}$/.test(project)) {
     throw new Error("Compose project name must be a short lowercase token.");
   }
-  const postgresPort = publishedPort(guestPortForward, ports.postgres, 5432);
-  const temporalPort = publishedPort(guestPortForward, ports.temporal, 7233);
+  const postgresPort = publishedPort(ports.postgres, 5432);
+  const temporalPort = publishedPort(ports.temporal, 7233);
   return `name: ${project}
 services:
   postgres:
@@ -291,7 +294,7 @@ volumes:
 `;
 }
 
-export function renderOpenCodeWrapper({ stateDir, repo, packageSpec }) {
+export function renderOpenCodeWrapper({ stateDir, repo, packageSpec, openCodePort }) {
   const root = resolve(stateDir);
   const source = resolve(repo);
   return `#!/usr/bin/env bash
@@ -309,6 +312,7 @@ export XDG_DATA_HOME="$PROVIDER/data"
 export XDG_CACHE_HOME="$PROVIDER/cache"
 export XDG_STATE_HOME="$PROVIDER/state"
 export OPENCODE_DISABLE_AUTOUPDATE=true
+export SPACE_DEV_STACK_OPENCODE_PORT="${openCodePort}"
 export USER="\${USER:-$(id -un 2>/dev/null || echo spaceapp)}"
 export LOGNAME="$USER"
 umask 077
@@ -457,12 +461,55 @@ export function installedPathFallbacks(configSource) {
   return [...keys].sort();
 }
 
-export function devProcessEnv({ stateDir, ports, databaseUrl, sessionSecret, repo = repoRoot }) {
+const FORWARDED_ENV_KEYS = [
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LANGUAGE",
+  "TZ",
+  "TERM",
+  "USER",
+  "LOGNAME",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "ALL_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+  "all_proxy",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "NODE_EXTRA_CA_CERTS",
+  "npm_config_registry",
+  "NPM_CONFIG_REGISTRY",
+  "npm_config_https_proxy",
+  "npm_config_proxy",
+  "NPM_CONFIG_HTTPS_PROXY",
+  "NPM_CONFIG_PROXY"
+];
+
+export function forwardedProcessEnv(source = process.env) {
+  const env = {};
+  for (const key of FORWARDED_ENV_KEYS) {
+    if (typeof source[key] === "string" && source[key] !== "") env[key] = source[key];
+  }
+  return env;
+}
+
+export function devProcessEnv({ stateDir, ports, databaseUrl, sessionSecret, repo = repoRoot, sourceEnv = process.env }) {
   const root = resolve(stateDir);
   const varRoot = join(root, "var");
-  const env = { ...process.env };
-  delete env.SPACE_DEV_LOGIN;
-  const socketPath = chooseSocketPath(root);
+  const home = join(root, "home");
+  const env = forwardedProcessEnv(sourceEnv);
+  env.HOME = home;
+  env.TMPDIR = join(root, "tmp");
+  env.XDG_CONFIG_HOME = join(home, ".config");
+  env.XDG_CACHE_HOME = join(home, ".cache");
+  env.XDG_DATA_HOME = join(home, ".local", "share");
+  env.XDG_STATE_HOME = join(home, ".local", "state");
+  const socketPath = chooseSocketPath(root, repo);
   const overrides = {
     ELECTRON_SKIP_BINARY_DOWNLOAD: "1",
     SPACE_DEV_LOGIN: "false",
@@ -552,10 +599,10 @@ export function serviceCommands({ repo = repoRoot, ports }) {
   };
 }
 
-function chooseSocketPath(stateDir) {
+export function chooseSocketPath(stateDir, root = repoRoot, temp = tmpdir()) {
   const preferred = join(stateDir, "sockets", "host.sock");
   if (preferred.length <= SOCKET_PATH_LIMIT) return preferred;
-  const short = join(tmpdir(), "spaceapp-dev-stack", "host.sock");
+  const short = join(fallbackSocketDirectory(root, temp), "host.sock");
   if (short.length > SOCKET_PATH_LIMIT) {
     throw new Error(`CLI host socket path is too long (${short.length}). Set TMPDIR to a short directory.`);
   }
@@ -622,7 +669,7 @@ async function runUp(stateDir) {
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
   const markerPath = join(paths.root, "OWNED");
   if (!existsSync(markerPath)) {
-    await writeFile(markerPath, `${JSON.stringify({ marker: STATE_MARKER, repoRoot, project: COMPOSE_PROJECT }, null, 2)}\n`, { mode: 0o600 });
+    await writeFile(markerPath, `${JSON.stringify({ marker: STATE_MARKER, repoRoot, project: composeProjectName() }, null, 2)}\n`, { mode: 0o600 });
   } else {
     await assertOwned(stateDir);
   }
@@ -645,12 +692,8 @@ async function runUp(stateDir) {
     sessionSecret: secrets.sessionSecret
   });
   await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
-  const guestPortForward = await composeUsesGuestPortForward();
-  if (guestPortForward) {
-    writeLine(1, "dev-stack: Colima forwards guest ports to 127.0.0.1 on this machine.");
-  }
-  await writeFile(paths.composeFile, renderCompose({ images, ports, guestPortForward }), { mode: 0o600 });
-  await writeWrapper(paths, packageSpec);
+  await writeFile(paths.composeFile, renderCompose({ images, ports, project: composeProjectName() }), { mode: 0o600 });
+  await writeWrapper(paths, packageSpec, ports.opencode);
   await copyStarterMemory(join(paths.varRoot, "memory"));
   await ensureDirectories(paths, socketPath);
 
@@ -659,11 +702,11 @@ async function runUp(stateDir) {
   // Pull first so the health wait is not spent downloading images.
   await pullComposeImages(docker, paths);
   try {
-    await runLogged(docker.argv, composeArgs(paths.composeFile, COMPOSE_PROJECT, "up", "-d", "--wait", "--wait-timeout", "300", "postgres", "temporal"), {
+    await runLogged(docker.argv, composeArgs(paths.composeFile, composeProjectName(), "up", "-d", "--wait", "--wait-timeout", "300", "postgres", "temporal"), {
       cwd: paths.root
     });
   } catch (error) {
-    const logs = await runLogged(docker.argv, composeArgs(paths.composeFile, COMPOSE_PROJECT, "logs", "--no-color", "--tail", "160"), {
+    const logs = await runLogged(docker.argv, composeArgs(paths.composeFile, composeProjectName(), "logs", "--no-color", "--tail", "160"), {
       cwd: paths.root,
       allowFailure: true
     });
@@ -676,7 +719,7 @@ async function runUp(stateDir) {
   let shuttingDown = false;
   let stack = {
     marker: STATE_MARKER,
-    project: COMPOSE_PROJECT,
+    project: composeProjectName(),
     supervisorPid: null,
     supervisorStarttime: null,
     ports,
@@ -691,7 +734,7 @@ async function runUp(stateDir) {
     await stopChildren(children);
     try {
       await stopOwnedOpenCodeServer(stateDir);
-      await runLogged(docker.argv, composeArgs(paths.composeFile, COMPOSE_PROJECT, ...DOWN_COMPOSE_ARGS), { cwd: paths.root });
+      await runLogged(docker.argv, composeArgs(paths.composeFile, composeProjectName(), ...DOWN_COMPOSE_ARGS), { cwd: paths.root });
     } catch (error) {
       writeLine(2, `dev-stack: docker down reported: ${error instanceof Error ? error.message : error}`);
     }
@@ -841,7 +884,7 @@ async function runDown(stateDir) {
   await stopOwnedOpenCodeServer(stateDir);
   if (existsSync(paths.composeFile)) {
     const docker = await resolveDocker();
-    await runLogged(docker.argv, composeArgs(paths.composeFile, stack?.project || COMPOSE_PROJECT, ...DOWN_COMPOSE_ARGS), { cwd: paths.root });
+    await runLogged(docker.argv, composeArgs(paths.composeFile, stack?.project || composeProjectName(), ...DOWN_COMPOSE_ARGS), { cwd: paths.root });
   }
   if (existsSync(paths.stackFile)) {
     const next = { ...(stack ?? {}), supervisorPid: null, children: [] };
@@ -859,7 +902,7 @@ async function runReset(stateDir) {
   }
   await assertOwned(stateDir);
   const stack = await readStack(paths.stackFile);
-  const project = stack?.project || COMPOSE_PROJECT;
+  const project = stack?.project || composeProjectName();
   const socketPath = stack?.socketPath;
   await runDown(stateDir);
   if (existsSync(paths.composeFile)) {
@@ -873,7 +916,7 @@ async function runReset(stateDir) {
   await rm(paths.root, { recursive: true, force: true });
   if (socketPath && !socketPath.startsWith(paths.root) && existsSync(dirname(socketPath))) {
     const parent = dirname(socketPath);
-    if (parent.includes("spaceapp-dev-stack")) await rm(parent, { recursive: true, force: true });
+    if (resolve(parent) === resolve(fallbackSocketDirectory())) await rm(parent, { recursive: true, force: true });
   }
   writeLine(1, "dev-stack: removed the dev-stack containers, volumes and state directory");
 }
@@ -965,10 +1008,10 @@ function databaseUrlFrom(password, port) {
   return `postgres://${DATABASE_USER}:${password}@127.0.0.1:${port}/${DATABASE_NAME}`;
 }
 
-async function writeWrapper(paths, packageSpec) {
+async function writeWrapper(paths, packageSpec, openCodePort) {
   await mkdir(paths.bin, { recursive: true, mode: 0o700 });
   const file = join(paths.bin, "opencode-vscode-parity");
-  await writeFile(file, renderOpenCodeWrapper({ stateDir: paths.root, repo: repoRoot, packageSpec }), { mode: 0o700 });
+  await writeFile(file, renderOpenCodeWrapper({ stateDir: paths.root, repo: repoRoot, packageSpec, openCodePort }), { mode: 0o700 });
   await chmod(file, 0o700);
 }
 
@@ -991,6 +1034,8 @@ async function ensureDirectories(paths, socketPath) {
     join(paths.varRoot, "app-diagnostics"),
     join(paths.varRoot, "memory-graph"),
     join(paths.root, "workspaces"),
+    join(paths.root, "home"),
+    join(paths.root, "tmp"),
     join(paths.root, "cli-state", "providers", "opencode"),
     dirname(socketPath)
   ]) {
@@ -1024,7 +1069,7 @@ async function pullComposeImages(docker, paths) {
   let last = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      await runLogged(docker.argv, composeArgs(paths.composeFile, COMPOSE_PROJECT, "pull", "postgres", "temporal"), {
+      await runLogged(docker.argv, composeArgs(paths.composeFile, composeProjectName(), "pull", "postgres", "temporal"), {
         cwd: paths.root
       });
       return;
@@ -1042,7 +1087,7 @@ async function pullComposeImages(docker, paths) {
 async function ensureTemporalNamespace(docker, composeFile) {
   const result = await runLogged(docker.argv, composeArgs(
     composeFile,
-    COMPOSE_PROJECT,
+    composeProjectName(),
     "exec",
     "-T",
     "temporal",
@@ -1086,10 +1131,11 @@ async function waitForReady(url, children, timeoutMs) {
 }
 
 export async function leftoverResources(docker, project) {
-  const containers = (await runLogged(docker.argv[0] === "sudo" ? ["sudo", "-n", "docker"] : ["docker"], [
+  const dockerBin = docker.argv[0] === "docker" ? ["docker"] : docker.argv.slice(0, -1);
+  const containers = (await runLogged(dockerBin, [
     "ps", "-aq", "--filter", `label=com.docker.compose.project=${project}`
   ], { allowFailure: true })).stdout.split("\n").map((line) => line.trim()).filter(Boolean);
-  const volumes = (await runLogged(docker.argv[0] === "sudo" ? ["sudo", "-n", "docker"] : ["docker"], [
+  const volumes = (await runLogged(dockerBin, [
     "volume", "ls", "-q", "--filter", `label=com.docker.compose.project=${project}`
   ], { allowFailure: true })).stdout.split("\n").map((line) => line.trim()).filter(Boolean);
   return { containers, volumes };
@@ -1097,14 +1143,8 @@ export async function leftoverResources(docker, project) {
 
 export async function resolveDocker() {
   // `docker compose version` succeeds without a daemon. `docker info` checks the socket.
-  const candidates = [
-    ["docker"],
-    ["sudo", "-n", "docker"]
-  ];
-  for (const argv of candidates) {
-    const result = await runLogged(argv, ["info"], { allowFailure: true });
-    if (result.status === 0) return { argv: [...argv, "compose"] };
-  }
+  const result = await runLogged(["docker"], ["info"], { allowFailure: true });
+  if (result.status === 0) return { argv: ["docker", "compose"] };
   throw new Error("Docker Compose is required. Install Docker and make `docker compose` usable without a password prompt.");
 }
 
@@ -1123,6 +1163,44 @@ function spawnLogged(command, args, { cwd, env, logPath }) {
 
 async function stopChildren(records) {
   await Promise.all(records.map((record) => stopRecordedProcess(record)));
+}
+
+async function listProcessIds() {
+  if (process.platform === "linux") {
+    const names = await readdir("/proc");
+    return names.filter((name) => /^[0-9]+$/.test(name)).map(Number).filter((pid) => pid > 1);
+  }
+  if (process.platform === "darwin") {
+    const { status, stdout } = await execFile("ps", ["-ax", "-o", "pid="]);
+    if (status !== 0) return [];
+    return stdout.split("\n").map((line) => Number(line.trim())).filter((pid) => Number.isInteger(pid) && pid > 1);
+  }
+  return [];
+}
+
+export async function devStackOwnedProcesses(stateDir) {
+  const records = [];
+  const seen = new Set();
+  const add = async (name, pid) => {
+    if (!Number.isInteger(pid) || pid <= 1 || seen.has(pid)) return;
+    seen.add(pid);
+    const identity = await readProcessIdentity(pid);
+    records.push({ name, pid, starttime: identity?.starttime ?? null });
+  };
+  const recordPath = join(stateDir, "cli-state", "providers", "opencode", "state", "opencode", "spaceapp-shared-server.json");
+  try {
+    const record = JSON.parse(await readFile(recordPath, "utf8"));
+    await add("opencode-server", record?.pid);
+  } catch {
+    // The pane has not started a shared server.
+  }
+  for (const pid of await listProcessIds()) {
+    const cwd = await processWorkingDirectory(pid);
+    const executable = await processExecutable(pid);
+    if (!cwdBelongsToState(stateDir, cwd) && !executableBelongsToState(stateDir, executable)) continue;
+    await add("dev-stack-process", pid);
+  }
+  return records;
 }
 
 export async function stopOwnedOpenCodeServer(stateDir) {

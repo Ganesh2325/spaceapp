@@ -4,7 +4,13 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ensureSharedServer } from '../../deploy/docker/opencode-shared-server.mjs';
+import { ensureSharedServer, sharedServerPort } from '../../deploy/docker/opencode-shared-server.mjs';
+
+test('the installed server stays on 47047 unless the dev stack sets a port', () => {
+  assert.equal(sharedServerPort({}), 47047);
+  assert.equal(sharedServerPort({ SPACE_DEV_STACK_OPENCODE_PORT: '54747' }), 54747);
+  assert.throws(() => sharedServerPort({ SPACE_DEV_STACK_OPENCODE_PORT: 'nope' }), /integer port/);
+});
 
 // Linux lab, 2026-10-20: two OpenCode panes started together in the Getting Started room; each ran its own --standalone server on
 // the shared provider store and the second died ("Standalone server exited before reporting readiness"). The fake below

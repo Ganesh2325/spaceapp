@@ -9,6 +9,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import WebSocket from "ws";
 import {
+  composeProjectName,
+  devStackOwnedProcesses,
   leftoverResources,
   processIdentityMatches,
   readProcessIdentity,
@@ -42,6 +44,21 @@ export function terminalFrameText(data) {
     // A frame can be plain text while the socket is still opening.
   }
   return text;
+}
+
+export function viteHotUpdate(messages) {
+  let sawUpdate = false;
+  for (const message of messages) {
+    let parsed;
+    try {
+      parsed = JSON.parse(message);
+    } catch {
+      continue;
+    }
+    if (parsed?.type === "full-reload") return "full-reload";
+    if (parsed?.type === "update") sawUpdate = true;
+  }
+  return sawUpdate ? "update" : null;
 }
 
 export function terminalSocketUrl(apiHttpUrl, paneId, ticket) {
@@ -185,10 +202,12 @@ async function proveApiReload(api) {
 
 async function proveWebReload(webPort) {
   const web = `http://127.0.0.1:${webPort}`;
-  const entry = join(repoRoot, "apps/web/src/main.tsx");
-  const original = await readFile(entry, "utf8");
+  const component = join(repoRoot, "apps/web/src/features/SurfaceErrorBoundary.tsx");
+  const original = await readFile(component, "utf8");
   const probe = "\n// dev-stack hmr probe\n";
+  if (original.includes(probe.trim())) throw new Error("The web reload probe is already in SurfaceErrorBoundary.tsx.");
   await fetch(`${web}/src/main.tsx`);
+  await fetch(`${web}/src/features/SurfaceErrorBoundary.tsx`);
   const client = await (await fetch(`${web}/@vite/client`)).text();
   const token = client.match(/const wsToken = "([^"]*)"/)?.[1] ?? "";
   const socket = new WebSocket(`${web.replace("http:", "ws:")}/?token=${encodeURIComponent(token)}`, "vite-hmr");
@@ -199,16 +218,20 @@ async function proveWebReload(webPort) {
     socket.once("error", reject);
   });
   try {
-    await writeFile(entry, `${original}${probe}`);
+    await writeFile(component, `${original}${probe}`);
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
-      if (messages.some((message) => message.includes("\"update\"") || message.includes("\"full-reload\""))) return;
+      const kind = viteHotUpdate(messages);
+      if (kind === "full-reload") {
+        throw new Error("Saving apps/web/src/features/SurfaceErrorBoundary.tsx produced a full reload, not a hot update.");
+      }
+      if (kind === "update") return;
       await delay(200);
     }
-    throw new Error("Saving apps/web/src/main.tsx did not produce a Vite HMR update.");
+    throw new Error("Saving apps/web/src/features/SurfaceErrorBoundary.tsx did not produce a Vite hot update.");
   } finally {
     socket.close();
-    await writeFile(entry, original);
+    await writeFile(component, original);
   }
 }
 
@@ -295,9 +318,12 @@ async function main() {
     say(`dev-stack gate: OpenCode pane ${pane.status}, ${pane.outputBytes} bytes of terminal output`);
     secrets = await secretValues(root);
     const stack = JSON.parse(await readFile(join(root, "stack.json"), "utf8"));
+    const owned = await devStackOwnedProcesses(root);
+    const children = stack.children ?? [];
     records = [
       { name: "supervisor", pid: supervisor.pid, starttime: (await readProcessIdentity(supervisor.pid))?.starttime ?? stack.supervisorStarttime },
-      ...(stack.children ?? [])
+      ...children,
+      ...owned.filter((record) => record.pid !== supervisor.pid && !children.some((child) => child.pid === record.pid))
     ];
     if (exercise) {
       say("dev-stack gate: checking API reload and Vite HMR");
@@ -327,7 +353,7 @@ async function main() {
     if (resetCode !== 0) resetFailure = new Error(`reset failed (${resetCode}): ${scrubSecrets(resetOut, secrets).slice(-2000)}`);
   }
   if (resetFailure) throw resetFailure;
-  await assertClean(docker, "spaceapp-devstack", records, optExisted);
+  await assertClean(docker, composeProjectName(repoRoot), records, optExisted);
   say(`dev-stack gate: clean. Scrubbed supervisor log: ${TRANSCRIPT}`);
 }
 
