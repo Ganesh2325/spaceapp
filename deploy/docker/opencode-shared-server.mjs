@@ -3,7 +3,7 @@
 // Two --standalone servers on the one provider store fail: the second exits with "Standalone server exited before reporting
 // readiness" (Linux lab, 2026-10-20, two panes started together in the Getting Started room). The next pane start brings a dead
 // server back, and changed OpenCode keys or config restart it so new panes see them.
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -17,12 +17,48 @@ const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { retu
 
 // The record lives on the CLI state volume and survives a container restart, after which its PID can belong to any other
 // process of the CLI user (pane host, credential agent): only a process that is this port's `opencode serve` is ours to
-// reuse or stop (1.1.7 review). Without /proc nothing is ours.
-async function ourServer(pid, port) {
-  if (!Number.isSafeInteger(pid) || pid <= 1 || !alive(pid)) return false;
-  const args = (await readFile(`/proc/${pid}/cmdline`, 'utf8').catch(() => '')).split('\0');
+// reuse or stop (1.1.7 review). Linux argv comes from /proc. Other platforms have no /proc cmdline, so ps supplies it.
+export function argumentsFromProcCmdline(text) {
+  return String(text).split('\0').filter((arg) => arg.length > 0);
+}
+
+// ps prints one space-separated line. A space inside one argument cannot be recovered; a space in the executable path
+// still leaves a token that ends in /opencode, and --port stays attached to the following token.
+export function argumentsFromPs(text) {
+  return String(text).trim().split(/\s+/).filter((arg) => arg.length > 0);
+}
+
+export function isOurOpenCodeServer(args, port) {
   const portAt = args.indexOf('--port');
   return args.includes('serve') && portAt !== -1 && args[portAt + 1] === String(port) && args.some((arg) => /(^|\/)opencode$/.test(arg));
+}
+
+function execFileText(command, args) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { encoding: 'utf8' }, (error, stdout, stderr) => {
+      if (error) reject(error);
+      else resolve({ stdout, stderr });
+    });
+  });
+}
+
+async function processArguments(pid) {
+  if (process.platform === 'linux') {
+    return argumentsFromProcCmdline(await readFile(`/proc/${pid}/cmdline`, 'utf8').catch(() => ''));
+  }
+  try {
+    // -ww: macOS ps truncates to the terminal width without it, which can drop --port.
+    // args= is the full argument vector. On macOS, command= is an alias of args=.
+    const { stdout } = await execFileText('ps', ['-ww', '-p', String(pid), '-o', 'args=']);
+    return argumentsFromPs(stdout);
+  } catch {
+    return [];
+  }
+}
+
+async function ourServer(pid, port) {
+  if (!Number.isSafeInteger(pid) || pid <= 1 || !alive(pid)) return false;
+  return isOurOpenCodeServer(await processArguments(pid), port);
 }
 
 async function healthy(port, password) {

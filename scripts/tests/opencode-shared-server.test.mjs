@@ -4,7 +4,18 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ensureSharedServer, sharedServerPort } from '../../deploy/docker/opencode-shared-server.mjs';
+import { argumentsFromProcCmdline, argumentsFromPs, ensureSharedServer, isOurOpenCodeServer, sharedServerPort } from '../../deploy/docker/opencode-shared-server.mjs';
+
+test('macOS ps argv still recognizes opencode serve when the path contains a space', () => {
+  const spaced = argumentsFromPs('/Users/Jane Doe/bin/opencode serve --hostname 127.0.0.1 --port 54747');
+  assert.equal(isOurOpenCodeServer(spaced, 54747), true);
+  assert.equal(isOurOpenCodeServer(spaced, 47047), false);
+  assert.equal(isOurOpenCodeServer(argumentsFromPs('sleep 30'), 54747), false);
+  const proc = argumentsFromProcCmdline('/Users/Jane Doe/bin/opencode\u0000serve\u0000--hostname\u0000127.0.0.1\u0000--port\u000054747\u0000');
+  assert.deepEqual(proc, ['/Users/Jane Doe/bin/opencode', 'serve', '--hostname', '127.0.0.1', '--port', '54747']);
+  assert.equal(isOurOpenCodeServer(proc, 54747), true);
+  assert.equal(isOurOpenCodeServer(argumentsFromProcCmdline(''), 54747), false);
+});
 
 test('the installed server stays on 47047 unless the dev stack sets a port', () => {
   assert.equal(sharedServerPort({}), 47047);
